@@ -37,9 +37,13 @@ end
 
 local function make_call_node(occ, depth, ancestors, target_owner)
   local sym = occ.caller_search
+  -- Identify a caller by owner *and* name: a controller `getUser` is not the
+  -- same function as `UserService.getUser`, so seeing one is not recursion
+  -- just because the other is already in the chain.
+  local key = sym and ((M.owner_of_node(occ) or "?") .. "\0" .. sym) or nil
   local anc = vim.deepcopy(ancestors)
-  if sym then
-    anc[sym] = true
+  if key then
+    anc[key] = true
   end
   return {
     kind = occ.kind, -- "call" | "ref"
@@ -52,7 +56,7 @@ local function make_call_node(occ, depth, ancestors, target_owner)
     expandable = sym ~= nil,
     -- A caller name we derived but cannot search (e.g. a computed key).
     unresolvable = occ.caller ~= nil and sym == nil,
-    recursive = sym ~= nil and ancestors[sym] == true,
+    recursive = key ~= nil and ancestors[key] == true,
     -- Does this call site actually reach the target definition?
     match = target_owner == nil or resolve.owner_matches(occ.owner, target_owner, occ.path),
     resolved = occ.owner ~= nil,
@@ -81,8 +85,11 @@ end
 function Tree:load(opts)
   -- Seed the ancestor set with the queried symbol so a same-named function
   -- elsewhere in the repo is flagged instead of re-expanding the same search.
-  local kids, err, defs =
-    children_for(self.symbol, self.root, 1, { [self.symbol] = true }, self.target_owner, opts)
+  local seed = {}
+  if self.target_owner then
+    seed[self.target_owner .. "\0" .. self.symbol] = true
+  end
+  local kids, err, defs = children_for(self.symbol, self.root, 1, seed, self.target_owner, opts)
   if err then
     self.err = err
     self.nodes = {}
