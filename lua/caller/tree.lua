@@ -3,6 +3,7 @@
 local config = require("caller.config")
 local scan = require("caller.scan")
 local resolve = require("caller.resolve")
+local lsp = require("caller.lsp")
 
 local M = {}
 
@@ -22,10 +23,11 @@ function M.owner_of_node(occ)
   return "module:" .. occ.path
 end
 
-function M.new(symbol, root, target_owner)
+function M.new(symbol, root, target_owner, engine)
   return setmetatable({
     symbol = symbol,
     root = root,
+    engine = engine or {},       -- { kind = "grep"|"lsp", client, method, item }
     target_owner = target_owner, -- nil = accept every owner
     nodes = {},                  -- top level children
     loaded = false,
@@ -58,7 +60,8 @@ local function make_call_node(occ, depth, ancestors, target_owner)
     unresolvable = occ.caller ~= nil and sym == nil,
     recursive = key ~= nil and ancestors[key] == true,
     -- Does this call site actually reach the target definition?
-    match = target_owner == nil or resolve.owner_matches(occ.owner, target_owner, occ.path),
+    match = occ.owner == "lsp" or target_owner == nil
+      or resolve.owner_matches(occ.owner, target_owner, occ.path),
     resolved = occ.owner ~= nil,
   }
 end
@@ -83,6 +86,38 @@ local function children_for(symbol, root, depth, ancestors, target_owner, opts)
 end
 
 function Tree:load(opts)
+  -- LSP engine: the server already knows exactly who calls what, so there is
+  -- no searching, no owner resolution and nothing to filter.
+  if self.engine.kind == "lsp" then
+    local occs
+    if self.engine.item then
+      occs = lsp.incoming(self.engine.client, self.engine.item, self.root, config.options.lsp_timeout)
+    else
+      occs = lsp.references_callers(self.engine.client, self.engine.bufnr or 0, self.root, config.options.lsp_timeout)
+    end
+    if not occs then
+      self.err = "the language server did not answer in time"
+      self.nodes = {}
+      return false
+    end
+    local kids = {}
+    for _, o in ipairs(occs) do
+      table.insert(kids, make_call_node(o, 1, {}, nil))
+    end
+    table.sort(kids, function(a, b)
+      if a.occ.rel ~= b.occ.rel then
+        return a.occ.rel < b.occ.rel
+      end
+      return a.occ.lnum < b.occ.lnum
+    end)
+    self.nodes = kids
+    self.defs = {}
+    self.loaded = true
+    self.filter = false
+    self.err = nil
+    return true
+  end
+
   -- Seed the ancestor set with the queried symbol so a same-named function
   -- elsewhere in the repo is flagged instead of re-expanding the same search.
   local seed = {}
@@ -105,6 +140,25 @@ end
 --- Expand a node: find who calls *its* caller function.
 function Tree:expand(node)
   if node.children then
+    node.expanded = true
+    return true
+  end
+
+  if self.engine.kind == "lsp" then
+    local occs
+    if node.occ.item then
+      occs = lsp.incoming(self.engine.client, node.occ.item, self.root, config.options.lsp_timeout)
+    elseif node.occ.ref_pos then
+      occs = lsp.references_at(self.engine.client, node.occ.ref_pos, self.root, config.options.lsp_timeout)
+    end
+    if not occs then
+      return false
+    end
+    local kids = {}
+    for _, o in ipairs(occs) do
+      table.insert(kids, make_call_node(o, node.depth + 1, node.ancestors, nil))
+    end
+    node.children = kids
     node.expanded = true
     return true
   end

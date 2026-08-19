@@ -104,9 +104,16 @@ function View:render()
     seg(head, HL.header, " in chain")
   end
   seg(head, HL.loc, "   " .. vim.fn.fnamemodify(tree.root, ":t"))
+  if tree.engine and tree.engine.kind == "lsp" then
+    seg(head, HL.class, "   via " .. (tree.engine.client and tree.engine.client.name or "lsp"))
+  end
   push(head)
 
-  if tree.target_owner then
+  if tree.engine and tree.engine.kind == "lsp" then
+    local tl = {}
+    seg(tl, HL.note, "resolved by the language server (" .. (tree.engine.method or "?") .. ")")
+    push(tl)
+  elseif tree.target_owner then
     local cls = tree.target_owner:match("^class:(.+)$")
     local tl = {}
     seg(tl, HL.note, "resolved  ")

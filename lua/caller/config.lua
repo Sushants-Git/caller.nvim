@@ -2,6 +2,16 @@ local M = {}
 
 ---@class caller.Config
 M.defaults = {
+  -- Which engine finds the call sites:
+  --   "auto"  use the language server when one is attached and capable,
+  --           otherwise fall back to ripgrep + treesitter
+  --   "lsp"   language server only (most correct, any language, needs a server)
+  --   "grep"  ripgrep + treesitter only (instant, no server, TS/JS)
+  engine = "auto",
+
+  -- How long to wait on a single LSP request, in ms.
+  lsp_timeout = 10000,
+
   -- Root to search. A function, or a string path.
   -- Default: git root of the current file, falling back to cwd.
   root = nil,

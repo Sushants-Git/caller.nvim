@@ -4,7 +4,6 @@
 local config = require("caller.config")
 local scan = require("caller.scan")
 local tree = require("caller.tree")
-local resolve = require("caller.resolve")
 
 local M = {}
 
@@ -70,7 +69,7 @@ local function title_for(symbol, owner, stack)
   local chain = table.concat(parts, " ← ")
 
   local suffix = ""
-  if owner then
+  if type(owner) == "string" then
     local cls = owner:match("^class:(.+)$")
     suffix = cls and ("  [" .. cls .. "]") or "  [module]"
   elseif owner == nil then
@@ -79,8 +78,29 @@ local function title_for(symbol, owner, stack)
   return "callers of " .. chain .. suffix
 end
 
+--- The tree spec that answers "who calls the function this node sits in?".
+local function next_spec(t, node)
+  if t.engine.kind == "lsp" then
+    return {
+      symbol = node.occ.caller or t.symbol,
+      engine = {
+        kind = "lsp",
+        client = t.engine.client,
+        method = t.engine.method,
+        item = node.occ.item,
+        ref_pos = node.occ.ref_pos,
+      },
+    }
+  end
+  return {
+    symbol = node.occ.caller_search,
+    owner = tree.owner_of_node(node.occ),
+    engine = { kind = "grep" },
+  }
+end
+
 --- Open a picker of everything that calls `symbol`.
----@param opts? { symbol?, root?, owner?, all?, refresh?, stack?, filter? }
+---@param opts? { symbol?, root?, owner?, all?, refresh?, stack?, filter?, engine? }
 function M.callers(opts)
   opts = opts or {}
   if not telescope() then
@@ -95,52 +115,53 @@ function M.callers(opts)
   local action_state = require("telescope.actions.state")
 
   local caller = require("caller")
-  local symbol = opts.symbol or caller.symbol_under_cursor()
-  if not symbol or not symbol:match("^[%a_$][%w_$]*$") then
+  local root = opts.root or scan.root(vim.api.nvim_buf_get_name(0))
+  if opts.refresh then
+    scan.clear_cache()
+    require("caller.lsp").clear_cache()
+  end
+
+  -- Engine first: with a language server we ask it directly and skip both the
+  -- ripgrep search and the owner resolution entirely.
+  local engine = opts.engine
+  if not engine then
+    engine = opts.symbol and { kind = "grep" } or caller.pick_engine(opts)
+    if engine.kind == "none" then
+      vim.notify("caller: " .. (engine.reason or "no engine available"), vim.log.levels.WARN)
+      return
+    end
+  end
+
+  local symbol = opts.symbol or engine.symbol or caller.symbol_under_cursor()
+  if not symbol then
     vim.notify("caller: no identifier under the cursor", vim.log.levels.WARN)
     return
   end
 
-  local root = opts.root or scan.root(vim.api.nvim_buf_get_name(0))
-  if opts.refresh then
-    scan.clear_cache()
+  local owner = opts.owner
+  if engine.kind == "grep" and owner == nil and not opts.all then
+    owner = caller.target_owner(scan.occurrences(symbol, root, { refresh = opts.refresh }), symbol)
   end
 
-  local occs, err = scan.occurrences(symbol, root, { refresh = opts.refresh })
-  if err then
-    vim.notify("caller: " .. err, vim.log.levels.ERROR)
+  local t = tree.new(symbol, root, owner, engine)
+  t:load({ refresh = opts.refresh })
+  if t.err then
+    vim.notify("caller: " .. t.err, vim.log.levels.ERROR)
     return
   end
-
-  local owner = opts.owner
-  if owner == nil and not opts.all then
-    owner = caller.target_owner(occs, symbol)
+  if opts.filter ~= nil then
+    t.filter = opts.filter
   end
 
-  local filter = opts.filter
-  if filter == nil then
-    filter = config.options.filter_by_type and owner ~= nil
-  end
-
-  local stack = opts.stack or {}
-
-  -- Collect the rows this picker will show.
-  local function rows(with_filter)
-    local out, hidden = {}, 0
-    for _, o in ipairs(occs) do
-      local keep = o.kind == "call" or (o.kind == "ref" and config.options.show_refs)
-      if keep then
-        if with_filter and owner and not resolve.owner_matches(o.owner, owner, o.path) then
-          hidden = hidden + 1
-        else
-          table.insert(out, o)
-        end
-      end
+  local entries, hidden = {}, 0
+  for _, n in ipairs(t.nodes) do
+    if t:visible(n) then
+      table.insert(entries, n.occ)
+    else
+      hidden = hidden + 1
     end
-    return out, hidden
   end
 
-  local entries, hidden = rows(filter)
   if #entries == 0 then
     vim.notify(
       ("caller: nothing calls %s%s"):format(symbol, hidden > 0 and (" (" .. hidden .. " hidden by type filter)") or ""),
@@ -149,12 +170,22 @@ function M.callers(opts)
     return
   end
 
-  local title = title_for(symbol, filter and owner or nil, stack)
+  local stack = opts.stack or {}
+  local title
+  if engine.kind == "lsp" then
+    title = title_for(symbol, false, stack) .. "  [" .. (engine.client and engine.client.name or "lsp") .. "]"
+  else
+    title = title_for(symbol, t.filter and owner or nil, stack)
+  end
   if hidden > 0 then
     title = title .. ("  (%d hidden)"):format(hidden)
   end
 
-  -- Reopen this picker with one option changed.
+  local by_occ = {}
+  for _, n in ipairs(t.nodes) do
+    by_occ[n.occ] = n
+  end
+
   local function reopen(bufnr, override)
     actions.close(bufnr)
     vim.schedule(function()
@@ -164,7 +195,8 @@ function M.callers(opts)
         owner = owner,
         all = opts.all,
         stack = stack,
-        filter = filter,
+        filter = t.filter,
+        engine = engine,
       }, override))
     end)
   end
@@ -182,22 +214,24 @@ function M.callers(opts)
         -- <C-l>: who calls the selected caller? (push a level)
         map({ "i", "n" }, "<C-l>", function()
           local sel = action_state.get_selected_entry()
-          if not sel or not sel.occ then
+          local node = sel and by_occ[sel.occ]
+          if not node then
             return
           end
-          local next_symbol = sel.occ.caller_search
-          if not next_symbol then
+          local spec = next_spec(t, node)
+          if not spec.symbol and not (spec.engine.item or spec.engine.ref_pos) then
             vim.notify("caller: nothing above this call site", vim.log.levels.INFO)
             return
           end
           local next_stack = vim.deepcopy(stack)
-          table.insert(next_stack, { symbol = symbol, owner = owner, root = root })
+          table.insert(next_stack, { symbol = symbol, owner = owner, root = root, engine = engine })
           actions.close(bufnr)
           vim.schedule(function()
             M.callers({
-              symbol = next_symbol,
+              symbol = spec.symbol,
               root = root,
-              owner = tree.owner_of_node(sel.occ),
+              owner = spec.owner,
+              engine = spec.engine,
               stack = next_stack,
             })
           end)
@@ -214,26 +248,33 @@ function M.callers(opts)
           table.remove(next_stack)
           actions.close(bufnr)
           vim.schedule(function()
-            M.callers({ symbol = prev.symbol, root = prev.root, owner = prev.owner, stack = next_stack })
+            M.callers({
+              symbol = prev.symbol,
+              root = prev.root,
+              owner = prev.owner,
+              engine = prev.engine,
+              stack = next_stack,
+            })
           end)
         end)
 
-        -- <C-f>: toggle the type filter
         map({ "i", "n" }, "<C-f>", function()
-          reopen(bufnr, { filter = not filter })
+          if engine.kind == "lsp" then
+            vim.notify("caller: the language server already resolved these exactly", vim.log.levels.INFO)
+            return
+          end
+          reopen(bufnr, { filter = not t.filter })
         end)
 
-        -- <C-y>: toggle non-call references
         map({ "i", "n" }, "<C-y>", function()
           config.options.show_refs = not config.options.show_refs
           reopen(bufnr, {})
         end)
 
-        -- <C-o>: hand off to the tree view, which shows the whole chain at once
         map({ "i", "n" }, "<C-o>", function()
           actions.close(bufnr)
           vim.schedule(function()
-            require("caller").find(symbol, { root = root, owner = owner })
+            require("caller").find(symbol, { root = root, owner = owner, engine_override = engine })
           end)
         end)
 

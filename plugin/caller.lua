@@ -30,6 +30,15 @@ end, {
   desc = "Callers in a Telescope picker with a live preview",
 })
 
+-- Force the ripgrep+treesitter engine, e.g. when the server is still starting.
+vim.api.nvim_create_user_command("CallerGrep", function(cmd)
+  require("caller").find(cmd.args ~= "" and cmd.args or nil, { refresh = cmd.bang, engine = "grep" })
+end, {
+  nargs = "?",
+  bang = true,
+  desc = "Callers via ripgrep + treesitter, without asking the language server",
+})
+
 -- Unfiltered variants: every same-named call site, whatever type it belongs to.
 vim.api.nvim_create_user_command("CallerAll", function(cmd)
   require("caller").find(cmd.args ~= "" and cmd.args or nil, { refresh = cmd.bang, all = true })

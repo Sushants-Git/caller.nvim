@@ -1,12 +1,16 @@
 # caller.nvim
 
-**Who calls this function?** — answered in ~100ms, without a language server.
+**Who calls this function?** — with your language server when it's there, and instantly
+without one when it isn't.
 
 Put your cursor on a function and get every call site, each attributed to the **function that
 contains it**. Then expand any caller to see who calls *it*, and keep walking up until you
 reach the route handler, cron job, or CLI entry point that actually sets the whole thing off.
 
-Built on ripgrep + treesitter. No LSP, no tsserver, no index to build, nothing to warm up.
+Two engines behind one keymap. If a capable language server is attached it answers — exact,
+type-checked, in **any language it speaks**. If not, ripgrep + treesitter answers in ~100ms
+with no server at all. Either way you get the same thing on top: every call site attributed
+to the function containing it, and an expandable chain.
 
 ```
 callers of getProfile  [UserService]
@@ -17,22 +21,30 @@ callers of getProfile  [UserService]
     · ref ‹module scope›                                app.ts:31
 ```
 
-## Why not just use the LSP?
+## Engines
 
-You often should — see [Alternatives](#alternatives). This exists for the case where you
-want the answer *now*:
-
-|  | caller.nvim | LSP call hierarchy |
+| | `lsp` | `grep` |
 | --- | --- | --- |
-| Cold start | ~100ms | seconds to minutes on a large repo |
-| Needs a server | no | yes, warmed up |
-| Depth | expandable chain | one level per request |
-| Shows the receiver | yes (`via this` vs `via userService`) | no |
-| Non-call references | yes (`router.get('/x', handler)`) | no |
-| Correctness | resolves bindings, not types | ground truth |
+| Source of truth | your language server | ripgrep + treesitter |
+| Correctness | exact (real type checker) | follows bindings; can say `unresolved` |
+| Languages | anything your server speaks | TypeScript / JavaScript / JSX |
+| Cold start | whatever the server needs | ~100ms, nothing to wait for |
+| Non-call references | no | yes (`router.get('/x', handler)`) |
 
-On a 300-file TypeScript API, `tsserver` took ~12s to attach before it could answer at all.
-caller.nvim answered the same question in 130ms with identical results.
+`engine = "auto"` (the default) uses the language server when one is attached and capable,
+and falls back to ripgrep otherwise. Force either with `engine = "lsp"` / `"grep"`, or run
+`:CallerGrep` for a one-off when the server is still starting.
+
+Within the LSP engine there are two paths, picked automatically:
+
+- **`callHierarchy/incomingCalls`** where the server supports it (tsserver, gopls,
+  rust-analyzer). The server reports the calling function directly.
+- **`textDocument/references` + `documentSymbol`** otherwise (e.g. lua_ls). References give
+  the exact call sites; document symbols say which function each one falls inside. Same
+  result, assembled locally.
+
+So `:Caller` works anywhere `<leader>vrr` works — it just tells you *who* rather than *where*,
+and lets you keep walking up.
 
 ## Install
 
@@ -84,6 +96,7 @@ Telescope is optional — without it you get the tree view and quickfix output.
 | `:Caller <name>` | Same, for a named symbol |
 | `:CallerQf` | Send call sites to the quickfix list |
 | `:CallerAll` / `:CallerQfAll` | Skip type resolution, show every same-named call |
+| `:CallerGrep` | Force the ripgrep engine, ignoring the language server |
 | `:Telescope caller` | Same as `:CallerPick` |
 
 Add `!` to any of them to bypass the cache and rescan.
@@ -195,9 +208,9 @@ factory, comes back `unresolved` rather than wrong. For a rename that must be co
 
 `E` (expand 3 levels) runs a scan per node and takes about a second on a 300-file repo.
 
-Language support is whatever treesitter parses plus the resolver's grammar knowledge, which is
-written against **TypeScript, JavaScript and JSX/TSX**. Other languages will find call sites but the
-type filtering will mostly report `unresolved`.
+These limits apply to the **grep engine only**. Its resolver encodes TypeScript grammar, so in
+other languages it will still find call sites but mostly report `unresolved`. Use the LSP
+engine for anything else — that is what it is for.
 
 ## Config
 
@@ -208,6 +221,8 @@ require("caller").setup({
   root = nil,             -- string | function(path) -> string; default: git root, else cwd
   globs = { "*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.cts" },
   exclude = { "node_modules", "dist", "build", ".next", "coverage", "__generated__", ".git" },
+  engine = "auto",        -- "auto" | "lsp" | "grep"
+  lsp_timeout = 10000,    -- ms to wait on a single LSP request
   max_hits = 2000,
   max_auto_depth = 3,     -- how far `E` walks
   filter_by_type = true,  -- hide same-name calls that reach a different function
@@ -244,7 +259,8 @@ language where call hierarchy isn't implemented.
 ```
 lua/caller/config.lua    defaults
 lua/caller/ts.lua        treesitter: is this a call, and who encloses it
-lua/caller/resolve.lua   follow bindings/imports to type a call's receiver
+lua/caller/lsp.lua       LSP engine: callHierarchy, or references + documentSymbol
+lua/caller/resolve.lua   grep engine: follow bindings/imports to type a receiver
 lua/caller/scan.lua      ripgrep -> file list -> analysis, with caching
 lua/caller/tree.lua      the caller tree and its recursive expansion
 lua/caller/ui.lua        tree window: rendering and keymaps

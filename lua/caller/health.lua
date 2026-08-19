@@ -43,6 +43,17 @@ function M.check()
     info("telescope.nvim not found - tree view and quickfix still work")
   end
 
+  start("caller.nvim: engine")
+  local cfg = require("caller.config")
+  info("engine: " .. tostring(cfg.options.engine))
+  local lsp = require("caller.lsp")
+  local client, method = lsp.client(0)
+  if client then
+    ok(("this buffer: %s via %s"):format(client.name, method))
+  else
+    info("no language server on this buffer - ripgrep + treesitter will be used")
+  end
+
   start("caller.nvim: config")
   local config = require("caller.config")
   info("filter_by_type: " .. tostring(config.options.filter_by_type))

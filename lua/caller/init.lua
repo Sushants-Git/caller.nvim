@@ -1,5 +1,6 @@
 local config = require("caller.config")
 local scan = require("caller.scan")
+local lsp = require("caller.lsp")
 local tree = require("caller.tree")
 local ui = require("caller.ui")
 
@@ -72,11 +73,47 @@ function M.target_owner(occs, symbol)
   return nil, nil
 end
 
+--- Decide which engine answers this question.
+--- "auto" prefers the language server, because it is a real type checker and
+--- works in whatever language it speaks; ripgrep+treesitter is the fallback
+--- when no capable server is attached.
+---@return table engine  { kind, client, method, item, bufnr }
+function M.pick_engine(opts)
+  local want = opts.engine or config.options.engine
+  if want == "grep" then
+    return { kind = "grep" }
+  end
+
+  local bufnr = vim.api.nvim_get_current_buf()
+  local client, method = lsp.client(bufnr)
+  if not client then
+    if want == "lsp" then
+      return { kind = "none", reason = "no language server attached to this buffer" }
+    end
+    return { kind = "grep" }
+  end
+
+  local engine = { kind = "lsp", client = client, method = method, bufnr = bufnr }
+  if method == "callHierarchy" then
+    local item = lsp.prepare(client, bufnr, config.options.lsp_timeout)
+    if not item then
+      if want == "lsp" then
+        return { kind = "none", reason = "the server found no symbol under the cursor" }
+      end
+      return { kind = "grep" }
+    end
+    engine.item = item
+    engine.symbol = item.name
+  end
+  return engine
+end
+
 --- Open the caller tree for `symbol` (defaults to the symbol under the cursor).
 ---@param symbol? string
 ---@param opts? { root?: string, refresh?: boolean }
 function M.find(symbol, opts)
   opts = opts or {}
+  opts.symbol_given = symbol ~= nil
   symbol = symbol or M.symbol_under_cursor()
   if not symbol or symbol == "" then
     vim.notify("caller: no symbol under the cursor", vim.log.levels.WARN)
@@ -90,17 +127,34 @@ function M.find(symbol, opts)
   local root = opts.root or scan.root(vim.api.nvim_buf_get_name(0))
   if opts.refresh then
     scan.clear_cache()
+    lsp.clear_cache()
   end
 
-  -- Resolve which same-named function the user actually means before building
-  -- the tree, so call sites on unrelated types can be filtered out.
-  local occs = scan.occurrences(symbol, root, { refresh = opts.refresh })
+  -- The engine is chosen from the *cursor*, so only do it when we were not
+  -- handed an explicit symbol to look up.
+  local engine = opts.engine_override
+  if not engine then
+    engine = (opts.symbol_given or opts.owner) and { kind = "grep" } or M.pick_engine(opts)
+  end
+  if engine.kind == "none" then
+    vim.notify("caller: " .. (engine.reason or "no engine available"), vim.log.levels.WARN)
+    return
+  end
+  if engine.symbol then
+    symbol = engine.symbol
+  end
+
   local owner = opts.owner
-  if owner == nil and not opts.all then
-    owner = M.target_owner(occs, symbol)
+  if engine.kind == "grep" then
+    -- Resolve which same-named function the user actually means before
+    -- building the tree, so call sites on unrelated types are filtered out.
+    local occs = scan.occurrences(symbol, root, { refresh = opts.refresh })
+    if owner == nil and not opts.all then
+      owner = M.target_owner(occs, symbol)
+    end
   end
 
-  local t = tree.new(symbol, root, owner)
+  local t = tree.new(symbol, root, owner, engine)
   t:load({ refresh = opts.refresh })
   if t.err then
     vim.notify("caller: " .. t.err, vim.log.levels.ERROR)

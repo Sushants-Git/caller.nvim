@@ -5,7 +5,8 @@ CONTENTS                                                       *caller-contents*
 
   1. Introduction ......................... |caller-introduction|
   2. Requirements ......................... |caller-requirements|
-  3. Setup ................................ |caller-setup|
+  3. Engines .............................. |caller-engines|
+  4. Setup ................................ |caller-setup|
   4. Commands ............................. |caller-commands|
   5. Mappings ............................. |caller-mappings|
   6. Reading a row ........................ |caller-rows|
@@ -36,11 +37,37 @@ a leaf function to the route or entry point that reaches it.
 Run |:checkhealth| caller to verify.                          *caller-health*
 
 ==============================================================================
-3. SETUP                                                          *caller-setup*
+3. ENGINES                                                      *caller-engines*
+
+Two engines answer the same question.
+
+lsp ~
+    Asks the attached language server. Exact, and works in any language the
+    server speaks. Uses `callHierarchy/incomingCalls` when the server offers
+    it, otherwise `textDocument/references` combined with
+    `textDocument/documentSymbol` to work out which function each reference
+    sits inside.
+
+grep ~
+    ripgrep narrows to candidate files, treesitter decides what is a real
+    call and who encloses it, and |caller-resolution| types the receiver.
+    No server, answers in about 100ms, but its grammar knowledge is written
+    against TypeScript and JavaScript.
+
+`engine = "auto"` (default) picks lsp when a capable server is attached and
+grep otherwise. |:CallerGrep| forces grep for one invocation.
+
+The grep engine additionally reports non-call references such as
+`router.get('/x', handler)`; the LSP engine reports calls only.
+
+==============================================================================
+4. SETUP                                                          *caller-setup*
 
                                                               *caller.setup()*
 >lua
     require("caller").setup({
+      engine = "auto",     -- "auto" | "lsp" | "grep"
+      lsp_timeout = 10000,
       root = nil,
       globs = { "*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.cts" },
       exclude = { "node_modules", "dist", "build", ".next", "coverage" },
@@ -84,6 +111,10 @@ show_refs ~
 
                                                                 *:CallerQfAll*
 :CallerQfAll [{name}]   As |:CallerQf|, without type resolution.
+
+                                                                *:CallerGrep*
+:CallerGrep [{name}]    Force the ripgrep engine, ignoring the language
+                        server. Useful while the server is still starting.
 
 :Telescope caller       Same as |:CallerPick|.
 
