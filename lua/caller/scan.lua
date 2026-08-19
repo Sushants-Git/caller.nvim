@@ -25,11 +25,20 @@ local function owner_of(occ, symbol)
     return resolve.owner_of_receiver(occ.path, occ.receiver, occ.caller_class)
   end
 
-  -- No receiver: a bare `symbol(...)` or a bare reference. Follow the binding
-  -- to whichever module supplies it, else it is defined right here.
+  -- No receiver: a bare `symbol(...)`, a JSX `<Symbol />`, or a bare
+  -- reference. Follow the binding to whichever module supplies it.
   local ok, owner = pcall(resolve.resolve_binding, occ.path, symbol)
   if ok and owner then
     return owner
+  end
+
+  -- Nothing resolved. Only claim this file owns the symbol when it is not
+  -- imported from somewhere else - otherwise we would silently attribute an
+  -- imported function to whichever file happens to use it, and then filter
+  -- out its real call sites.
+  local ok2, binds = pcall(resolve.bindings, occ.path)
+  if ok2 and binds and binds.vars[symbol] and binds.vars[symbol].module then
+    return nil -- imported, but we could not follow it: honestly unresolved
   end
   return "module:" .. occ.path
 end

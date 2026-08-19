@@ -225,6 +225,18 @@ function M.classify(node, src)
     return "call", nil
   end
 
+  -- The closing half of <Foo>...</Foo> is syntax, not a second call site.
+  if pt == "jsx_closing_element" then
+    return "syntax", nil
+  end
+
+  -- JSX: <Foo /> and <Foo>...</Foo> invoke the component, so they are calls.
+  if pt == "jsx_self_closing_element" or pt == "jsx_opening_element" then
+    if field1(p, "name") == node or p:named_child(0) == node then
+      return "call", nil
+    end
+  end
+
   -- Method call: obj.foo() / this.foo() / obj?.foo()
   if pt == "member_expression" and field1(p, "property") == node then
     local gp = p:parent()
@@ -233,6 +245,11 @@ function M.classify(node, src)
       p, gp = gp, gp:parent()
     end
     if gp and gp:type() == "call_expression" and field1(gp, "function") == p then
+      local obj = M.unwrap(field1(p, "object"))
+      return "call", obj and text(obj, src) or nil
+    end
+    -- <Foo.Bar /> is likewise a call on Foo
+    if gp and (gp:type() == "jsx_self_closing_element" or gp:type() == "jsx_opening_element") then
       local obj = M.unwrap(field1(p, "object"))
       return "call", obj and text(obj, src) or nil
     end

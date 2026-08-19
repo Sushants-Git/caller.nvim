@@ -155,7 +155,11 @@ files: >
 <
 Followed: `new Foo()`, type annotations, typed class fields, `this`,
 default/named/aliased imports, re-exports, namespace imports, `index.ts`
-barrels, and `extends` chains.
+barrels, `extends` chains, and non-relative imports resolved through
+tsconfig `baseUrl` and `paths` aliases.
+
+JSX counts as a call: rendering `<Panel />` invokes the component, so React
+components show their real render sites.
 
 The target is chosen from whatever is under the cursor: a definition names
 itself, a call site names its receiver's type. If the cursor gives no hint and

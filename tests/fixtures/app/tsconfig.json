@@ -1,0 +1,9 @@
+{
+  // JSONC: comments and trailing commas must not break parsing
+  "compilerOptions": {
+    "baseUrl": "src" /* non-relative imports resolve from here */,
+    "paths": {
+      "@widgets/*": ["widgets/*"],
+    },
+  },
+}

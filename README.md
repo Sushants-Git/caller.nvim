@@ -139,6 +139,7 @@ if the identifier is the callee of a `call_expression`:
 | `svc?.getProfile(x)` / `svc!.getProfile(x)` | **call** |
 | `(svc as any).getProfile(x)` | **call** |
 | `arr.map(x => svc.getProfile(x))` | **call**, attributed to the enclosing named fn |
+| `<Panel />` / `<Panel>…</Panel>` | **call** — rendering a component invokes it (closing tag not double-counted) |
 | `const fn = svc.getProfile` | ref — assigned, never invoked |
 | `svc.getProfile.bind(svc)` | ref — the call here is `.bind` |
 | `router.get('/x', getProfile)` | ref — handler registration |
@@ -148,7 +149,7 @@ if the identifier is the callee of a `call_expression`:
 | `"getProfile(x)"` in a string | not captured |
 
 ```sh
-nvim --headless -u NONE -l tests/run.lua    # 74 assertions
+nvim --headless -u NONE -l tests/run.lua    # 86 assertions
 ```
 
 ## Telling same-named functions apart
@@ -167,7 +168,9 @@ controllers/user.ts:  userService.getProfile(id)
 ```
 
 Followed: `new Foo()`, `x: Foo` annotations, typed class fields (for `this.x.m()`), `this`,
-default/named/aliased imports, re-exports, namespace imports, and `index.ts` barrels.
+default/named/aliased imports, re-exports, namespace imports, `index.ts` barrels, and
+non-relative imports through tsconfig `baseUrl` and `paths` aliases (`import { Panel } from
+'components/Panel'`).
 Subclasses match a base-class target through `extends`. Bare calls resolve to the module that
 supplies the binding.
 
@@ -178,8 +181,10 @@ The header names which one was resolved, and `t` (or `<C-f>`) toggles the filter
 When the cursor gives no hint — `:Caller <name>` typed from an unrelated buffer — and several
 definitions share the name, it reports `ambiguous` and shows everything rather than guessing.
 
-Receivers it cannot resolve are marked `unresolved` and **always shown**. It never silently
-drops a call site it did not understand.
+Receivers it cannot resolve are marked `unresolved` and **always shown**. In particular, a
+symbol imported from a module that cannot be followed is reported as unresolved rather than
+being attributed to the file that happens to use it — otherwise its real call sites would be
+filtered away.
 
 ## Limits
 
@@ -191,7 +196,7 @@ factory, comes back `unresolved` rather than wrong. For a rename that must be co
 `E` (expand 3 levels) runs a scan per node and takes about a second on a 300-file repo.
 
 Language support is whatever treesitter parses plus the resolver's grammar knowledge, which is
-written against **TypeScript and JavaScript**. Other languages will find call sites but the
+written against **TypeScript, JavaScript and JSX/TSX**. Other languages will find call sites but the
 type filtering will mostly report `unresolved`.
 
 ## Config

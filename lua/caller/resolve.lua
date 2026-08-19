@@ -9,12 +9,14 @@ local ts = require("caller.ts")
 
 local M = {}
 
-local file_cache = {} -- [path] = bindings table
-local read_cache = {} -- [path] = content | false
+local file_cache = {}     -- [path] = bindings table
+local read_cache = {}     -- [path] = content | false
+local tsconfig_cache = {} -- [dir]  = { baseUrl, paths } | false
 
 function M.clear_cache()
   file_cache = {}
   read_cache = {}
+  tsconfig_cache = {}
 end
 
 local function read(path)
@@ -30,6 +32,79 @@ local function read(path)
   fd:close()
   read_cache[path] = content
   return content
+end
+
+--- Strip comments and trailing commas so tsconfig.json (which is JSONC)
+--- can go through a strict JSON decoder.
+local function strip_jsonc(s)
+  local out, i, n = {}, 1, #s
+  local in_str, esc = false, false
+  while i <= n do
+    local c = s:sub(i, i)
+    if in_str then
+      out[#out + 1] = c
+      if esc then
+        esc = false
+      elseif c == "\\" then
+        esc = true
+      elseif c == '"' then
+        in_str = false
+      end
+      i = i + 1
+    elseif c == '"' then
+      in_str = true
+      out[#out + 1] = c
+      i = i + 1
+    elseif c == "/" and s:sub(i + 1, i + 1) == "/" then
+      while i <= n and s:sub(i, i) ~= "\n" do
+        i = i + 1
+      end
+    elseif c == "/" and s:sub(i + 1, i + 1) == "*" then
+      i = i + 2
+      while i <= n and not (s:sub(i, i) == "*" and s:sub(i + 1, i + 1) == "/") do
+        i = i + 1
+      end
+      i = i + 2
+    else
+      out[#out + 1] = c
+      i = i + 1
+    end
+  end
+  return (table.concat(out):gsub(",(%s*[%]}])", "%1"))
+end
+
+--- Nearest tsconfig/jsconfig above `path`, reduced to what module
+--- resolution needs: an absolute baseUrl and the paths aliases.
+function M.tsconfig_for(path)
+  local dir = vim.fn.fnamemodify(path, ":h")
+  if tsconfig_cache[dir] ~= nil then
+    return tsconfig_cache[dir] or nil
+  end
+
+  local found = vim.fs.find({ "tsconfig.json", "jsconfig.json" }, { upward = true, path = dir, type = "file" })[1]
+  if not found then
+    tsconfig_cache[dir] = false
+    return nil
+  end
+
+  local content = read(found)
+  local ok, decoded = pcall(vim.json.decode, strip_jsonc(content or ""))
+  if not ok or type(decoded) ~= "table" then
+    tsconfig_cache[dir] = false
+    return nil
+  end
+
+  local co = decoded.compilerOptions or {}
+  local cfg_dir = vim.fn.fnamemodify(found, ":h")
+  local conf = {
+    baseUrl = co.baseUrl and vim.fs.normalize(cfg_dir .. "/" .. co.baseUrl) or nil,
+    paths = co.paths,
+  }
+  if not conf.baseUrl and conf.paths then
+    conf.baseUrl = cfg_dir
+  end
+  tsconfig_cache[dir] = conf
+  return conf
 end
 
 local function text(node, src)
@@ -250,16 +325,12 @@ end
 
 local EXTS = { ".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mts", ".cts" }
 
---- Resolve an import specifier to a file on disk. Relative paths only;
---- bare specifiers are external packages we deliberately do not chase.
-function M.resolve_module(from_path, spec)
-  if not spec or not spec:match("^%.") then
-    return nil
-  end
-  local dir = vim.fn.fnamemodify(from_path, ":h")
-  local base = vim.fs.normalize(dir .. "/" .. spec)
+--- base -> base.ts / base.tsx / ... / base/index.ts / ...
+local function candidates(base)
   base = base:gsub("%.js$", "") -- ESM-style ./x.js -> ./x
-
+  if vim.fn.filereadable(base) == 1 and base:match("%.[jt]sx?$") then
+    return base
+  end
   for _, ext in ipairs(EXTS) do
     local p = base .. ext
     if vim.fn.filereadable(p) == 1 then
@@ -271,6 +342,58 @@ function M.resolve_module(from_path, spec)
     if vim.fn.filereadable(p) == 1 then
       return p
     end
+  end
+  return nil
+end
+
+--- Resolve an import specifier to a file on disk.
+--- Handles relative paths, plus tsconfig `paths` aliases and `baseUrl`
+--- (so `import x from 'components/Foo'` works). Bare specifiers that match
+--- nothing are external packages, which we deliberately do not chase.
+function M.resolve_module(from_path, spec)
+  if not spec or spec == "" then
+    return nil
+  end
+
+  if spec:match("^%.") then
+    local dir = vim.fn.fnamemodify(from_path, ":h")
+    return candidates(vim.fs.normalize(dir .. "/" .. spec))
+  end
+
+  local tc = M.tsconfig_for(from_path)
+  if not tc then
+    return nil
+  end
+
+  -- tsconfig `paths` aliases, e.g. "@components/*": ["client/components/*"]
+  if tc.paths and tc.baseUrl then
+    for pattern, targets in pairs(tc.paths) do
+      if type(targets) == "table" then
+        local prefix = pattern:match("^(.*)%*$")
+        local rest
+        if prefix then
+          rest = spec:match("^" .. vim.pesc(prefix) .. "(.*)$")
+        elseif pattern == spec then
+          rest = ""
+        end
+        if rest then
+          for _, t in ipairs(targets) do
+            local target = prefix and t:gsub("%*", function()
+              return rest
+            end) or t
+            local got = candidates(vim.fs.normalize(tc.baseUrl .. "/" .. target))
+            if got then
+              return got
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- plain baseUrl resolution
+  if tc.baseUrl then
+    return candidates(vim.fs.normalize(tc.baseUrl .. "/" .. spec))
   end
   return nil
 end
@@ -311,7 +434,7 @@ function M.resolve_binding(path, name, seen)
           return "class:" .. d.class
         end
         if type(d) == "string" then
-          return M.resolve_binding(target, d, seen)
+          return M.resolve_binding(target, d, seen) or ("module:" .. target)
         end
         return "module:" .. target
       end

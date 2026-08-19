@@ -111,5 +111,61 @@ end
 check(resolve.owner_matches("class:Sub", "class:Beta", cpath), "resolver: Sub should match Beta through extends")
 check(not resolve.owner_matches("class:Alpha", "class:Beta", cpath), "resolver: Alpha must not match Beta")
 
+-- ------------------------------------------------- JSX + tsconfig baseUrl
+local appdir = fixdir .. "/app"
+local screen = appdir .. "/src/screen.tsx"
+local screen_src = assert(io.open(screen)):read("*a")
+
+-- tsconfig is JSONC (comments + trailing commas) and must still parse
+local tc = resolve.tsconfig_for(screen)
+check(tc ~= nil, "tsconfig: JSONC should parse")
+check(tc and tc.baseUrl == appdir .. "/src", "tsconfig: baseUrl should resolve to <app>/src")
+
+-- non-relative import via baseUrl, and via a paths alias
+check(
+  resolve.resolve_module(screen, "components/Panel") == appdir .. "/src/components/Panel.tsx",
+  "baseUrl import should resolve"
+)
+check(
+  resolve.resolve_module(screen, "@widgets/Badge") == appdir .. "/src/widgets/Badge.tsx",
+  "paths alias should resolve"
+)
+
+-- rendering a component is calling it
+local jsx, by_line = {}, {}
+for _, o in ipairs(ts.analyse(screen, screen_src, "Panel")) do
+  jsx[o.lnum] = jsx[o.lnum] or o
+  by_line[o.lnum] = (by_line[o.lnum] or 0) + 1
+end
+check(jsx[7] and jsx[7].kind == "call", "<Panel /> self-closing should be a call")
+check(jsx[8] and jsx[8].kind == "call", "<Panel>child</Panel> should be a call")
+check(jsx[14] and jsx[14].kind == "ref", "const notRendered = Panel should stay a ref")
+check(jsx[1] and jsx[1].kind == "import", "the import specifier stays an import")
+
+-- <Panel>child</Panel> must count once, not twice: the closing tag is syntax
+local calls_on_8 = 0
+for _, o in ipairs(ts.analyse(screen, screen_src, "Panel")) do
+  if o.lnum == 8 and o.kind == "call" then
+    calls_on_8 = calls_on_8 + 1
+  end
+end
+check(calls_on_8 == 1, ("<Panel>..</Panel> should be one call, got %d"):format(calls_on_8))
+
+-- and the owner follows the aliased/base-url import back to the defining module
+for _, o in ipairs({ jsx[7], jsx[8] }) do
+  if o then
+    check(
+      resolve.resolve_binding(screen, "Panel") == "module:" .. appdir .. "/src/components/Panel.tsx",
+      "JSX call owner should be the module that defines the component"
+    )
+  end
+end
+
+-- an import we cannot follow must be unresolved, never claimed by the using file
+check(
+  resolve.resolve_binding(screen, "SomethingExternal") == nil,
+  "an unknown binding should resolve to nil, not to the current file"
+)
+
 print(("\n%d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)
