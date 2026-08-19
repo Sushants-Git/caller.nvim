@@ -1,0 +1,191 @@
+*caller.txt*   Who calls this function?                     Last change: 2026
+
+==============================================================================
+CONTENTS                                                       *caller-contents*
+
+  1. Introduction ......................... |caller-introduction|
+  2. Requirements ......................... |caller-requirements|
+  3. Setup ................................ |caller-setup|
+  4. Commands ............................. |caller-commands|
+  5. Mappings ............................. |caller-mappings|
+  6. Reading a row ........................ |caller-rows|
+  7. Type resolution ...................... |caller-resolution|
+  8. Limits ............................... |caller-limits|
+  9. Highlights ........................... |caller-highlights|
+
+==============================================================================
+1. INTRODUCTION                                            *caller-introduction*
+
+caller.nvim answers "who calls this function?" using ripgrep and treesitter,
+with no language server involved.
+
+Every call site is attributed to the function that contains it, and any caller
+can be expanded to show its own callers, so a chain can be walked upward from
+a leaf function to the route or entry point that reaches it.
+
+==============================================================================
+2. REQUIREMENTS                                            *caller-requirements*
+
+  - Neovim 0.10+
+  - ripgrep (`rg`) on $PATH
+  - treesitter parsers for the languages you search: >
+      :TSInstall typescript tsx javascript
+<
+  - telescope.nvim (optional, for |:CallerPick|)
+
+Run |:checkhealth| caller to verify.                          *caller-health*
+
+==============================================================================
+3. SETUP                                                          *caller-setup*
+
+                                                              *caller.setup()*
+>lua
+    require("caller").setup({
+      root = nil,
+      globs = { "*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.cts" },
+      exclude = { "node_modules", "dist", "build", ".next", "coverage" },
+      max_hits = 2000,
+      max_auto_depth = 3,
+      filter_by_type = true,
+      show_refs = true,
+      window = { width = 0.85, height = 0.8, border = "rounded" },
+    })
+<
+root ~
+    Directory to search. A string, or a function receiving the current file
+    path and returning a directory. Defaults to the git root of the current
+    file, falling back to |getcwd()|.
+
+filter_by_type ~
+    Resolve each call site's receiver and hide call sites that reach a
+    different function of the same name. See |caller-resolution|.
+
+show_refs ~
+    Include identifier references that are not direct calls, such as
+    `router.get('/x', handler)`.
+
+==============================================================================
+4. COMMANDS                                                    *caller-commands*
+
+                                                                     *:Caller*
+:Caller [{name}]        Tree view of everything that calls {name}, or the
+                        symbol under the cursor. Add ! to rescan.
+
+                                                                 *:CallerPick*
+:CallerPick [{name}]    Telescope picker with a live preview of each call
+                        site. Requires telescope.nvim.
+
+                                                                   *:CallerQf*
+:CallerQf [{name}]      Send call sites to the |quickfix| list.
+
+                                                                  *:CallerAll*
+:CallerAll [{name}]     As |:Caller|, without type resolution: shows every
+                        same-named call site.
+
+                                                                *:CallerQfAll*
+:CallerQfAll [{name}]   As |:CallerQf|, without type resolution.
+
+:Telescope caller       Same as |:CallerPick|.
+
+==============================================================================
+5. MAPPINGS                                                    *caller-mappings*
+
+Inside the picker: ~
+
+  <CR>      jump to the call site
+  <C-l>     drill up: callers of the selected caller
+  <C-h>     back down a level
+  <C-f>     toggle type filtering
+  <C-y>     toggle non-call references
+  <C-o>     switch to the tree view
+
+Inside the tree window: ~
+
+  <CR>, <Tab>   expand/collapse: who calls this caller
+  o, gd         jump to the call site
+  <C-v>         open in a vertical split
+  <C-x>         open in a split
+  <C-t>         open in a new tab
+  E             expand the whole tree (max_auto_depth levels)
+  W             collapse everything
+  t             toggle type filtering
+  f             toggle non-call references
+  R             rescan from disk
+  ?             help
+  q, <Esc>      close
+
+All tree keys are configurable through the `keys` table in |caller.setup()|.
+
+==============================================================================
+6. READING A ROW                                                   *caller-rows*
+>
+    ▸ updateProfile   UserService   via this   services/user.ts:88
+      └ caller        └ its class   └ how the callee was reached
+<
+via {receiver} ~
+    How the callee was reached. `via this` is an internal call; `via
+    userService` came through an imported instance.
+
+ref ~
+    The identifier is passed around but not invoked, e.g. a route handler
+    registration.
+
+‹module scope› ~
+    A top-level call, so there is nothing above it to expand.
+
+›callback ~
+    The call sits inside an anonymous callback; the name shown is the nearest
+    named function around it.
+
+unresolved ~
+    The receiver's type could not be determined. Such rows are always shown.
+
+==============================================================================
+7. TYPE RESOLUTION                                           *caller-resolution*
+
+Two functions often share a name. To keep their call sites apart, each
+receiver is resolved to a concrete type by following the binding across
+files: >
+
+    userService.getProfile(id)
+      import userService from '../services/user'
+      export default userService
+      export const userService = new UserService()
+      -> class:UserService
+<
+Followed: `new Foo()`, type annotations, typed class fields, `this`,
+default/named/aliased imports, re-exports, namespace imports, `index.ts`
+barrels, and `extends` chains.
+
+The target is chosen from whatever is under the cursor: a definition names
+itself, a call site names its receiver's type. If the cursor gives no hint and
+several definitions share the name, everything is shown and the header reports
+`ambiguous`.
+
+==============================================================================
+8. LIMITS                                                        *caller-limits*
+
+This follows bindings, not types. There is no control-flow analysis, no
+generic instantiation and no interface-implementation matching, so a receiver
+typed only as an interface or produced by a factory reports `unresolved`
+rather than being guessed wrong.
+
+For a rename that must be complete, |vim.lsp.buf.references()| on a warm
+server remains the ground truth.
+
+The resolver's grammar knowledge is written against TypeScript and JavaScript.
+Other languages will still find call sites, but type filtering will mostly
+report `unresolved`.
+
+==============================================================================
+9. HIGHLIGHTS                                                *caller-highlights*
+
+All linked to sensible defaults; override with |nvim_set_hl()|.
+
+  CallerHeader    CallerSymbol    CallerCount     CallerFile
+  CallerChevron   CallerName      CallerClass     CallerRecv
+  CallerLoc       CallerSnippet   CallerNote      CallerRef
+  CallerHint
+
+==============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:
