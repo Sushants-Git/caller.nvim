@@ -29,7 +29,7 @@ callers of getProfile  [UserService]
 | Correctness | exact (real type checker) | follows bindings; can say `unresolved` |
 | Languages | anything your server speaks | TypeScript / JavaScript / JSX |
 | Cold start | whatever the server needs | ~100ms, nothing to wait for |
-| Non-call references | no | yes (`router.get('/x', handler)`) |
+| Non-call references | yes | yes (`router.get('/x', handler)`) |
 
 `engine = "auto"` (the default) uses the language server when one is attached and capable,
 and falls back to ripgrep otherwise. Force either with `engine = "lsp"` / `"grep"`, or run
@@ -42,6 +42,11 @@ Within the LSP engine there are two paths, picked automatically:
 - **`textDocument/references` + `documentSymbol`** otherwise (e.g. lua_ls). References give
   the exact call sites; document symbols say which function each one falls inside. Same
   result, assembled locally.
+
+A route handler is never *called* - it is handed to `router.get(path, handler)` - so
+`incomingCalls` alone would report it as dead code. The LSP engine therefore also asks for
+plain references, drops the ones already reported as calls, and uses treesitter to throw out
+imports; whatever is left shows as a `ref` row. That is how a handler reaches its route.
 
 So `:Caller` works anywhere `<leader>vrr` works — it just tells you *who* rather than *where*,
 and lets you keep walking up.

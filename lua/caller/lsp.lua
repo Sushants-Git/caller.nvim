@@ -31,6 +31,16 @@ function M.clear_cache()
   line_cache = {}
 end
 
+local function read_file(path)
+  local fd = io.open(path, "r")
+  if not fd then
+    return nil
+  end
+  local content = fd:read("*a")
+  fd:close()
+  return content
+end
+
 local function file_line(path, lnum)
   local lines = line_cache[path]
   if not lines then
@@ -70,6 +80,18 @@ function M.client(bufnr)
     return fallback, "references"
   end
   return nil, nil
+end
+
+--- Requests about a file the client was never attached to come back empty,
+--- because the server was never told the document exists. Load the buffer and
+--- attach before asking.
+function M.ensure_attached(client, uri)
+  local bufnr = vim.uri_to_bufnr(uri)
+  vim.fn.bufload(bufnr)
+  if not vim.lsp.buf_is_attached(bufnr, client.id) then
+    pcall(vim.lsp.buf_attach_client, bufnr, client.id)
+  end
+  return bufnr
 end
 
 local function request(client, method, params, timeout, bufnr)
@@ -124,6 +146,15 @@ function M.prepare(client, bufnr, timeout)
   return res[1]
 end
 
+--- Position params pointing at a call-hierarchy item's own name.
+function M.item_params(item)
+  local range = item.selectionRange or item.range
+  return {
+    textDocument = { uri = item.uri },
+    position = { line = range.start.line, character = range.start.character },
+  }
+end
+
 --- Incoming calls for a prepared item.
 ---@return table[]|nil occurrences
 function M.incoming(client, item, root, timeout)
@@ -143,8 +174,6 @@ function M.incoming(client, item, root, timeout)
   end
   return out
 end
-
--- ---------------------------------------------------------------- fallback
 
 local function flatten_symbols(symbols, out, container)
   out = out or {}
@@ -181,7 +210,6 @@ local function contains(range, line, char)
   return true
 end
 
---- Innermost function symbol containing a position.
 local function enclosing_symbol(symbols, line, char)
   local best = nil
   for _, s in ipairs(symbols) do
@@ -194,6 +222,92 @@ local function enclosing_symbol(symbols, line, char)
   return best
 end
 
+--- Call hierarchy reports *calls*. A route handler is never called - it is
+--- handed to `router.get(path, handler)` - so incomingCalls legitimately
+--- returns nothing for it, and the tree would claim it is dead code.
+---
+--- So we also ask for plain references, drop the ones already reported as
+--- calls, drop imports (treesitter tells us which is which), and surface the
+--- remainder as `ref` rows. That is where handlers get wired to routes.
+---@param known table<string, boolean>  "path:line:col" of call sites already found
+--- `params` defaults to the cursor; recursion passes the position of the
+--- function whose callers we are now after.
+function M.extra_references(client, bufnr, root, timeout, known, symbol, params)
+  params = params and vim.deepcopy(params) or vim.lsp.util.make_position_params(0, client.offset_encoding)
+  params.context = { includeDeclaration = false }
+  local refs = request(client, "textDocument/references", params, timeout, bufnr)
+  if not refs then
+    return {}
+  end
+
+  local ts = require("caller.ts")
+  local classified = {} -- [path] = { ["lnum:col"] = kind }
+  local symbols_by_uri = {}
+  local out = {}
+
+  for _, loc in ipairs(refs) do
+    local uri = loc.uri or loc.targetUri
+    local range = loc.range or loc.targetSelectionRange
+    if uri and range then
+      local path = vim.uri_to_fname(uri)
+      local lnum, col = range.start.line + 1, range.start.character + 1
+      local key = ("%s:%d:%d"):format(path, lnum, col)
+
+      if not known[key] then
+        -- Ask treesitter what this occurrence actually is, so imports and
+        -- definitions do not masquerade as usages.
+        if classified[path] == nil and symbol then
+          local map = {}
+          local content = read_file(path)
+          if content and ts.lang_for(path) then
+            for _, o in ipairs(ts.analyse(path, content, symbol)) do
+              map[("%d:%d"):format(o.lnum, o.col)] = o
+            end
+          end
+          classified[path] = map
+        end
+        local occ = classified[path] and classified[path][("%d:%d"):format(lnum, col)]
+        local kind = occ and occ.kind or "ref"
+
+        if kind ~= "import" and kind ~= "def" and kind ~= "type" and kind ~= "syntax" then
+          if symbols_by_uri[uri] == nil then
+            local sbuf = M.ensure_attached(client, uri)
+            local res = request(client, "textDocument/documentSymbol", {
+              textDocument = { uri = uri },
+            }, timeout, sbuf)
+            symbols_by_uri[uri] = flatten_symbols(res or {})
+          end
+          local sym = enclosing_symbol(symbols_by_uri[uri], range.start.line, range.start.character)
+
+          table.insert(out, {
+            path = path,
+            rel = root and path:sub(#root + 2) or path,
+            lnum = lnum,
+            col = col,
+            kind = kind == "call" and "call" or "ref",
+            caller = sym and sym.name or nil,
+            caller_class = sym and sym.container or nil,
+            caller_search = sym and sym.name or nil,
+            line = file_line(path, lnum),
+            ref_pos = sym and {
+              textDocument = { uri = uri },
+              position = {
+                line = sym.selectionRange.start.line,
+                character = sym.selectionRange.start.character,
+              },
+            } or nil,
+            owner = "lsp",
+          })
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- ---------------------------------------------------------------- fallback
+
+--- Innermost function symbol containing a position.
 --- references + documentSymbol, for servers without callHierarchy.
 --- `params` defaults to the cursor position; recursion passes an explicit one.
 function M.references_callers(client, bufnr, root, timeout, params)
@@ -213,8 +327,7 @@ function M.references_callers(client, bufnr, root, timeout, params)
       local path = vim.uri_to_fname(uri)
 
       if symbols_by_uri[uri] == nil then
-        local sbuf = vim.uri_to_bufnr(uri)
-        vim.fn.bufload(sbuf)
+        local sbuf = M.ensure_attached(client, uri)
         local res = request(client, "textDocument/documentSymbol", {
           textDocument = { uri = uri },
         }, timeout, sbuf)
@@ -250,8 +363,7 @@ end
 
 --- Callers of the function a previous result pointed at.
 function M.references_at(client, pos, root, timeout)
-  local bufnr = vim.uri_to_bufnr(pos.textDocument.uri)
-  vim.fn.bufload(bufnr)
+  local bufnr = M.ensure_attached(client, pos.textDocument.uri)
   return M.references_callers(client, bufnr, root, timeout, vim.deepcopy(pos))
 end
 

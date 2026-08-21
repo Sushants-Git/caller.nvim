@@ -57,8 +57,10 @@ grep ~
 `engine = "auto"` (default) picks lsp when a capable server is attached and
 grep otherwise. |:CallerGrep| forces grep for one invocation.
 
-The grep engine additionally reports non-call references such as
-`router.get('/x', handler)`; the LSP engine reports calls only.
+Both engines report non-call references such as `router.get('/x', handler)`.
+Call hierarchy alone would miss those - a handler is referenced, never
+called - so the LSP engine also asks for plain references and keeps the ones
+that are not calls or imports.
 
 ==============================================================================
 4. SETUP                                                          *caller-setup*

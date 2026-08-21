@@ -92,6 +92,26 @@ function Tree:load(opts)
     local occs
     if self.engine.item then
       occs = lsp.incoming(self.engine.client, self.engine.item, self.root, config.options.lsp_timeout)
+      -- callHierarchy only reports calls, so a route handler that is passed to
+      -- `router.get(path, handler)` would look like dead code. Pick those up
+      -- from plain references.
+      if occs and config.options.show_refs then
+        local known = {}
+        for _, o in ipairs(occs) do
+          known[("%s:%d:%d"):format(o.path, o.lnum, o.col)] = true
+        end
+        local extra = lsp.extra_references(
+          self.engine.client,
+          self.engine.bufnr or 0,
+          self.root,
+          config.options.lsp_timeout,
+          known,
+          self.symbol
+        )
+        for _, o in ipairs(extra or {}) do
+          table.insert(occs, o)
+        end
+      end
     else
       occs = lsp.references_callers(self.engine.client, self.engine.bufnr or 0, self.root, config.options.lsp_timeout)
     end
@@ -147,13 +167,40 @@ function Tree:expand(node)
   if self.engine.kind == "lsp" then
     local occs
     if node.occ.item then
-      occs = lsp.incoming(self.engine.client, node.occ.item, self.root, config.options.lsp_timeout)
+      local item = node.occ.item
+      occs = lsp.incoming(self.engine.client, item, self.root, config.options.lsp_timeout)
+      -- same reasoning as in load(): a handler is referenced, never called
+      if occs and config.options.show_refs then
+        local known = {}
+        for _, o in ipairs(occs) do
+          known[("%s:%d:%d"):format(o.path, o.lnum, o.col)] = true
+        end
+        local ibuf = lsp.ensure_attached(self.engine.client, item.uri)
+        local extra = lsp.extra_references(
+          self.engine.client,
+          ibuf,
+          self.root,
+          config.options.lsp_timeout,
+          known,
+          item.name,
+          lsp.item_params(item)
+        )
+        for _, o in ipairs(extra or {}) do
+          table.insert(occs, o)
+        end
+      end
     elseif node.occ.ref_pos then
       occs = lsp.references_at(self.engine.client, node.occ.ref_pos, self.root, config.options.lsp_timeout)
     end
     if not occs then
       return false
     end
+    table.sort(occs, function(a, b)
+      if a.rel ~= b.rel then
+        return a.rel < b.rel
+      end
+      return a.lnum < b.lnum
+    end)
     local kids = {}
     for _, o in ipairs(occs) do
       table.insert(kids, make_call_node(o, node.depth + 1, node.ancestors, nil))
